@@ -1,0 +1,1182 @@
+---
+title: "Counts Lab -- WGCNA from PMI adjusted expression profiles of tau-bearing CBF neurons
+  in Alzheimers disease"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+## Plot expression
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(WGCNA)
+library(openxlsx)
+library(RColorBrewer)
+library(fgsea)
+library(preprocessCore)
+library(patchwork)
+library(ggfortify)
+library(DT)
+library(gprofiler2)
+library(vegan)
+
+options(stringsAsFactors = FALSE)
+set.seed(1)
+pwr = 22
+res_dir = paste0("results/pmi_adjusted_wgcna_power", pwr)
+
+if(!dir.exists(res_dir)){
+  dir.create(res_dir)
+}
+
+```
+
+The plot below shows the gene expression distribution for each sample. The black vertical line represents the median gene expression. Ideally, especially for differential expression analysis, the gene expression distributions would be similar across samples. The plot below is saved in `r paste0(res_dir, "/Expression_unfiltered_unnormalized.png")`
+
+```{r, message=FALSE, warning=FALSE, fig.width=8, fig.height=20}
+
+# load data
+expr = read.xlsx('data/NB TOC1 dataset_final VAI.xlsx')
+
+expr_df = as.data.frame(expr)
+
+expr_df = 
+  expr_df %>%
+  mutate(Sample = paste0(CASE, "_", GROUP, "_rep", Replicate)) %>%
+  rowwise() %>%
+  mutate(NTRK3 = mean(NTRK3ECD, NTRK3TK),
+         NTRK2 = mean(NTRK2ECD, NTRK2TK),
+         NTRK1 = mean(NTRK1ECD, NTRK1TK)) %>%
+  dplyr::select(-NTRK3ECD, -NTRK3TK,
+                -NTRK2ECD, -NTRK2TK,
+                -NTRK1ECD, -NTRK1TK)
+
+expr_df$Sample =  gsub(" ", "_", expr_df$Sample)
+
+tidy_expr = 
+  expr_df %>%
+  pivot_longer(cols = -c(Sample, CASE, GROUP, Replicate), 
+               names_to = "Gene",
+               values_to = "Expr")
+
+#plot expression 
+p = 
+tidy_expr %>%
+ggplot() +
+  aes(x=Sample, y=Expr, fill=Sample) +
+  geom_violin(trim = FALSE, show.legend = FALSE) +
+  stat_summary(fun = "median", 
+               geom = "point", 
+               shape = 108, 
+               size = 5, 
+               color = "black", 
+               show.legend = FALSE) +
+  labs(y="Expression", x = "Sample", 
+       title="Expression by Sample", 
+       subtitle="unfiltered, non-normalized",
+       caption=paste0("produced on ", Sys.time())) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust=1)) +
+  coord_flip() 
+
+plot(p)
+
+ggsave(p, 
+       file = paste0(res_dir, "/Expression_unfiltered_unnormalized.png"),
+       width = 8,
+       height = 20)
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=8, fig.height=20}
+# build meta data ----------------------------------------
+
+meta = 
+  tidy_expr %>%
+  dplyr::select(Sample, GROUP) %>%
+  distinct() %>%
+  separate_wider_delim(Sample, 
+                       delim = "_", 
+                       cols_remove = FALSE,
+                       names = c("ID", "Diagnosis", "Neurons", "Replicate"))
+
+meta = as.data.frame(meta)
+
+rownames(meta) = meta$Sample
+
+# load traits table
+traits = read.csv("data/subject_metadata.csv")
+traits$X = NULL
+traits$X.1 = NULL
+traits$ID = as.character(traits$ID)
+
+meta = left_join(meta, traits)
+
+# fix expression matrix
+sample_names = expr_df$Sample
+gene_names = colnames(expr_df)
+expr_df$Sample = NULL
+expr_df$CASE = NULL
+expr_df$GROUP = NULL
+expr_df$Replicate = NULL
+
+rawExpr = as.matrix(expr_df)
+rownames(rawExpr) = sample_names
+```
+
+## Remove effect of PMI with a linear model
+
+This plot can be found in `r paste0(res_dir, "/Expression_unfiltered_PMI_adjusted.png")`
+
+```{r, message=FALSE, warning=FALSE, fig.width=8, fig.height=20}
+lmExpr = empiricalBayesLM(rawExpr, removedCovariates = meta$PMI_hrs)$adjustedData
+
+lmExpr_df = as.data.frame(lmExpr)
+lmExpr_df$Sample = rownames(lmExpr_df)
+
+tidy_lmExpr = 
+  lmExpr_df %>%
+  pivot_longer(cols = -c(Sample), 
+               names_to = "Gene",
+               values_to = "Expr")
+
+#plot expression 
+p = 
+  tidy_lmExpr %>%
+  ggplot() +
+  aes(x=Sample, y=Expr, fill=Sample) +
+  geom_violin(trim = FALSE, show.legend = FALSE) +
+  stat_summary(fun = "median", 
+               geom = "point", 
+               shape = 108, 
+               size = 5, 
+               color = "black", 
+               show.legend = FALSE) +
+  labs(y="Expression", x = "Sample", 
+       title="Expression by Sample", 
+       subtitle="unfiltered, PMI corrected",
+       caption=paste0("produced on ", Sys.time())) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust=1)) +
+  coord_flip() 
+
+plot(p)
+
+ggsave(p,
+       file = "results/PMI_corrected_expression.png",
+       width = 8,
+       height = 20)
+```
+
+## PCA 
+
+A PCA (Principal Component Analysis) plot is a way to visualize and explore the variation in gene expression data.
+
+Gene expression experiments generate thousands of gene expression values, and PCA is a technique to reduce the complexity of this data by identifying the most important patterns of variation across the samples. In a PCA plot, each sample is represented as a point in a two-dimensional space, where the axes correspond to the principal components that capture the largest amounts of variation in the data.
+
+A PCA plot for gene expression data allows you to visualize and explore the relationships between samples based on their gene expression profiles. This can be useful for identifying groups of samples that cluster together based on their gene expression patterns, or for identifying outliers or potential confounding factors that may be affecting the results.
+
+In the PCA plots shown below, the samples are colored by diagnosis and neuron type, diagnosis alone, neuron type alone, and PMI. There does not appear to be any grouping based on these categories. The plot can be found in `r paste0(res_dir, "/pca.pdf")` 
+
+```{r, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+
+# check for outliers
+gsg_lm = goodSamplesGenes(lmExpr, verbose = 0)
+
+# PCA raw data  ------------------------------------------
+# PCA 
+pca = prcomp(lmExpr, scale. = TRUE)
+
+p_group = autoplot(pca, data = meta, colour = 'GROUP')
+p_diag = autoplot(pca, data = meta, colour = 'Diagnosis')
+p_neur = autoplot(pca, data = meta, colour = 'Neurons')
+p_pmi = autoplot(pca, data = meta, colour = 'PMI_hrs')
+
+p_all = p_group + p_diag + p_neur + p_pmi +
+  plot_annotation(title = "Expression")
+
+plot(p_all)
+
+ggsave(p_all, file = "results/PMI_corrected_pca.pdf",
+       width = 8,
+       height = 6)
+
+```
+
+## WGCNA
+
+Weighted Gene Co-expression Network Analysis (WGCNA) is a widely used computational method in bioinformatics and systems biology for analyzing gene expression data. It focuses on identifying patterns of co-expression among genes and grouping them into modules or clusters based on their expression patterns. This technique is particularly useful for understanding the relationships between genes and how they might work together in biological processes or regulatory networks.
+
+### Picking the soft thresholding power
+
+Since not all gene pairs exhibit meaningful co-expression, a soft thresholding approach is used to transform the co-expression similarity values into a measure of connectivity. The soft threshold helps emphasize strong relationships while diminishing weaker ones. The threshold can be determined using various methods, such as scale-free topology fit index or the elbow criterion. We use the elbow criterion to choose the lowest power for which the scale-free topology fit index curve flattens out upon reaching a high value. Here that power is `r pwr`. Because each gene should be weakly connected to most other genes, we want to pick a soft threshold that minimized mean connectivity. The mean connectivity also minimizes around `r pwr` The plots below are saved in `r paste0(res_dir, "/Scale_independence.png")` and `r paste0(res_dir, "/Mean_connectivity.png")`.
+
+```{r, message=FALSE, warning=FALSE, fig.width = 10, fig.height = 5, eval=TRUE}
+# Automatic network construction and module detection --------------------
+# https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-02-networkConstr-auto.pdf
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=30, by=2))
+
+# Call the network topology analysis function
+sft = pickSoftThreshold(lmExpr, 
+                        powerVector = powers, 
+                        verbose = 0,
+                        networkType = "signed")
+
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+png(paste0(res_dir,"/Scale_independence.png"))
+plot(sft$fitIndices[,1], 
+     -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",
+     ylab="Scale Free Topology Model Fit,signed R^2",
+     type="n",
+     main = paste("Scale independence"))
+text(sft$fitIndices[,1], 
+     -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,
+     cex=cex1,
+     col="red")
+invisible(invisible(dev.off()))
+# 22
+
+png(file = paste0(res_dir,"/Mean_connectivity.png"))
+plot(sft$fitIndices[,1], 
+     sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",
+     ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], 
+     sft$fitIndices[,5], 
+     labels=powers, 
+     cex=cex1,
+     col="red")
+invisible(dev.off())
+# also flattens around 22
+```
+
+```{r, echo=FALSE,out.width="70%",out.height="70%",fig.show='hold',fig.align='center'}
+knitr::include_graphics(c(paste0(res_dir,"/Scale_independence.png"), paste0(res_dir, "/Mean_connectivity.png")))
+``` 
+
+### Network construction and module detection
+
+The connectivity values between each pair of genes are used to construct an adjacency matrix, which represents the strength of co-expression relationships between genes. This matrix is typically transformed into a topological overlap matrix (TOM) to account for indirect connections through shared neighbors.
+
+Modules, also known as clusters, are groups of genes that share similar expression patterns. WGCNA identifies these modules by applying hierarchical clustering or other methods to the TOM. The result is a dendrogram that illustrates the relationships between different modules.
+
+Here, we choose a minimal module size of 10 genes. The plot below is saved in `r paste0(res_dir, "/module_dendrogram.pdf")`.
+
+```{r, message=FALSE, warning=FALSE}
+# One-step network construction and module detection
+
+if(file.exists(paste0(res_dir, "/net.Rdata"))){load(paste0(res_dir, "/net.Rdata"))
+  } else {
+net = blockwiseModules(lmExpr, 
+                       power = pwr,
+                       TOMType = "signed", 
+                       networkType = "signed",
+                       minModuleSize = 10,
+                       reassignThreshold = 0, 
+                       mergeCutHeight = 0.25,
+                       numericLabels = TRUE, 
+                       pamRespectsDendro = FALSE,
+                       maxBlockSize = 10000, 
+                       saveTOMs = TRUE,
+                       saveTOMFileBase = paste0(res_dir, "/tom"),
+                       verbose = 0)
+save(net, file = paste0(res_dir, "/net.Rdata"))
+}
+
+# plot module dendrogram
+mergedColors = labels2colors(net$colors)
+
+plotDendroAndColors(net$dendrograms[[1]], 
+                    mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE,
+                    hang = 0.03,
+                    addGuide = TRUE, 
+                    guideHang = 0.05)
+
+pdf(file = paste0(res_dir, "/module_dendrogram.pdf"))
+plotDendroAndColors(net$dendrograms[[1]], 
+                    mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels = FALSE,
+                    hang = 0.03,
+                    addGuide = TRUE, 
+                    guideHang = 0.05)
+invisible(dev.off())
+
+moduleLabels = net$colors
+moduleColors = labels2colors(net$colors)
+
+moduleColors_df = as.data.frame(moduleColors)
+
+ngenes = 
+  moduleColors_df %>%
+  group_by(moduleColors) %>%
+  tally(n = "nGenes")
+
+knitr::kable(ngenes, caption = "Number of genes per module")
+
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+save(MEs, moduleLabels, moduleColors, geneTree,
+     file = paste0(res_dir,"/networkConstruction_signed.RData"))
+
+```
+
+### Module Trait Correlations
+
+Module Eigengene: Each module is summarized by a representative expression profile known as an "eigengene". The eigengene is calculated as the first principal component of the gene expression values within the module and represents the overall expression pattern of the module.
+
+Module-Trait Relationships: WGCNA allows for the association of modules with external traits or conditions of interest, such as disease states or experimental variables, by correlating these variables with the module eigengene. This can help identify modules that are biologically relevant to specific processes or phenotypes.
+
+In the plot below, the color represents the correlation of the module with the trait. The numbers in each box are `correlation (adjusted p-value)`. Genes in the grey module were not able to be clustered. The plot is saved in `r paste0(res_dir, "/Module-trait_heatmap.pdf")`. 
+
+The table show module trait correlation with p-val < .05. Only correlations with FDR < .05 should be reported. The full results are in `r paste0(res_dir, "/moduleTraitCor.csv")`.
+
+```{r, message=FALSE, warning=FALSE, fig.width=12, fig.height=12}
+# correlate module MEs with metadata --------------------------------------
+# https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-03-relateModsToExt.R
+
+# Define numbers of genes and samples
+nGenes = ncol(lmExpr);
+nSamples = nrow(lmExpr);
+
+# add sample names
+sample_names = as.data.frame(rownames(lmExpr))
+colnames(sample_names) = "Sample"
+
+sample_traits = 
+  sample_names %>%
+  separate(Sample, 
+           sep = "_", 
+           into = c("ID", 
+                    "Diagnosis", 
+                    "Neuron", 
+                    "Replicate"),
+           remove = FALSE) %>%
+  mutate(p75 = case_when(
+    Neuron == "p75" ~ 1,
+    Neuron == "TOC1" ~ 0),
+    TOC1 = case_when(
+    Neuron == "p75" ~ 0,
+    Neuron == "TOC1" ~ 1)
+    ) %>%
+  dplyr::select(-Diagnosis, -Replicate, -Neuron) %>%
+  left_join(traits) %>%
+  dplyr::select(-ID)
+
+rownames(sample_traits) = sample_traits$Sample
+sample_traits$Sample = NULL
+
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(lmExpr, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, sample_traits, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
+moduleTraitFDR = apply(moduleTraitPvalue, 2, p.adjust, method = "BH")
+
+# Will display correlations and their p-values
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                    signif(moduleTraitFDR, 1), ")", sep = "");
+
+dim(textMatrix) = dim(moduleTraitCor)
+
+
+# Display the correlation values within a heat map plot
+
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(sample_traits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = TRUE,
+               cex.text = 0.5,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+pdf(file = paste0(res_dir, "/Module-trait_heatmap_pretty.pdf"), width=10, height=9)
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = names(sample_traits),
+               yLabels = names(MEs),
+               ySymbols = names(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = TRUE,
+               cex.text = 0.5,
+               cex.lab = 0.8,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+invisible(dev.off())
+
+moduleTraitCor = as.data.frame(moduleTraitCor)
+moduleTraitCor$Module = rownames(moduleTraitCor)
+  
+tidy_cor = pivot_longer(moduleTraitCor, 
+                        cols = c(-Module),
+                        names_to = "Trait",
+                        values_to = "Correlation")
+  
+moduleTraitPvalue = as.data.frame(moduleTraitPvalue)
+moduleTraitPvalue$Module = rownames(moduleTraitPvalue)
+
+tidy_p = pivot_longer(moduleTraitPvalue, 
+                        cols = c(-Module),
+                        names_to = "Trait",
+                        values_to = "Pval")
+
+moduleTraitFDR = as.data.frame(moduleTraitFDR)
+moduleTraitFDR$Module = rownames(moduleTraitFDR)
+
+tidy_fdr = pivot_longer(moduleTraitFDR, 
+                        cols = c(-Module),
+                        names_to = "Trait",
+                        values_to = "FDR")
+
+tidy_cor = left_join(tidy_cor, tidy_p)
+tidy_cor = left_join(tidy_cor, tidy_fdr)
+
+write.csv(tidy_cor, paste0(res_dir, "/moduleTraitCor.csv"))
+
+datatable(tidy_cor %>% filter(Pval < .05, Module != "MEgrey") %>%
+            mutate(Pval = format(Pval, digits=3),
+                   FDR = format(FDR, digits=3),
+                   Correlation = format(Correlation, digits=3)) %>%
+            arrange(FDR)
+  )
+
+```
+
+### Test for associations between categorical traits and module eigengenes using Wilcoxon or Kruskal-Wallis test.
+
+Another way to test for an association between module eigengenes and categorical traits is by using the Wilcoxon Rank-Sum or Kruskal-Wallis tests. The Wilcoxon Rank-Sum testis a non-parametric test that compares two independent groups to determine if their distributions differ. The Kruskal-Wallis test is a non-parametric equivalent of one-way ANOVA and compares more than two independent groups. The results can be found in:
+
+  * `r paste0(res_dir, "/ME_Sex_wilcox_test.csv")`  
+  * `r paste0(res_dir, "/ME_Neurons_wilcox_test.csv")`  
+  * `r paste0(res_dir, "/ME_Diagnosis_kruskal_test.csv")` 
+  * `r paste0(res_dir, "/ME_APOE_kruskal_test.csv")`
+  
+```{r, message=FALSE, warning=FALSE, fig.width = 8, fig.height = 10}
+
+library(rstatix)
+
+MEs_df = MEs0
+MEs_df$Sample = rownames(MEs_df)
+
+me_meta = 
+  meta %>%
+  mutate(
+    Sex = case_when(Male == 1 ~ "Male",
+                    Male == 0 ~ "Female"),
+    APOE = case_when(APOE2 == 1 ~ "APOE2",
+                     APOE3 == 1 ~ "APOE3",
+                     APOE4 == 1 ~ "APOE4")) %>%
+  select(Sample, ID, Diagnosis, Neurons,
+         GROUP, Sex, APOE) %>%
+  left_join(MEs_df, by = "Sample") %>%
+  pivot_longer(cols = starts_with("ME"),
+               names_to = "Module",
+               values_to = "ModuleEigengene")
+           
+wilcox_sex_df = 
+  me_meta %>%
+  group_by(Module) %>%
+  wilcox_test(ModuleEigengene ~ Sex) %>%
+  mutate(Padj = p.adjust(p, method = "BH"))
+
+write.csv(wilcox_sex_df, file = paste0(res_dir, "/ME_Sex_wilcox_test.csv"))
+
+wilcox_neuron_df = 
+  me_meta %>%
+  group_by(Module) %>%
+  wilcox_test(ModuleEigengene ~ Neurons) %>%
+  mutate(Padj = p.adjust(p, method = "BH"))
+
+write.csv(wilcox_neuron_df, file = paste0(res_dir, "/ME_Neurons_wilcox_test.csv"))
+
+kw_diag_df = 
+  me_meta %>%
+  group_by(Module) %>%
+  kruskal_test(ModuleEigengene ~ Diagnosis) %>%
+  mutate(Padj = p.adjust(p, method = "BH"))
+
+write.csv(kw_diag_df, file = paste0(res_dir, "/ME_Diagnosis_kruskal_test.csv"))
+
+kw_apoe_df = 
+  me_meta %>%
+  group_by(Module) %>%
+  kruskal_test(ModuleEigengene ~ APOE) %>%
+  mutate(Padj = p.adjust(p, method = "BH"))
+
+write.csv(kw_apoe_df, file = paste0(res_dir, "/ME_APOE_kruskal_test.csv"))
+
+gene_module_vec = names(moduleLabels) 
+names(gene_module_vec) = moduleColors
+
+plot_me = function(module, me_meta, trait, pval_df){
+  
+  n_genes = length(gene_module_vec[which(names(gene_module_vec)==module)])
+  me_mod = paste0("ME", module)
+  
+  padj = 
+    pval_df %>%
+    filter(Module == me_mod) %>%
+    pull(Padj)
+  
+  pval = 
+    pval_df %>%
+    filter(Module == me_mod) %>%
+    pull(p)
+    
+  p = 
+    me_meta %>%
+    filter(Module == me_mod) %>%
+    ggplot(aes(x = {{ trait }}, y = ModuleEigengene)) +
+    geom_boxplot(outlier.shape = NA, color = "black") +
+    geom_jitter(alpha = .7, size =1, color = module) +
+    labs(title = paste0(module, " (", n_genes, " genes)"),
+        subtitle = paste0("p-value = ", 
+                          formatC(pval, format = "e", digits = 2),
+                          "\nFDR = ",
+                          formatC(padj, format = "e", digits = 2))) +
+    theme_classic() +
+    theme(plot.subtitle = element_text(size = 8),
+          plot.title = element_text(size = 10),
+          legend.position="none")
+     
+  
+  return(p)
+
+}
+
+mods = unique(names(gene_module_vec))
+
+me_neurons = lapply(mods, plot_me, me_meta, Neurons, wilcox_neuron_df)
+
+wrap_plots(me_neurons, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") + 
+  plot_annotation(title = 'Wilcoxon Rank Sum: Neuron Type')
+
+ggsave(file = paste0(res_dir, "/Neurons_me_boxplot.png"), width = 8, height = 10)
+
+me_diag = lapply(mods, plot_me, me_meta, Diagnosis, kw_diag_df)
+
+wrap_plots(me_diag, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") + 
+  plot_annotation(title = 'Kruskal-Wallis: Diagnosis')
+
+ggsave(file = paste0(res_dir, "/Diagnosis_me_boxplot.png"), width = 8, height = 10)
+
+me_apoe = lapply(mods, plot_me, me_meta, APOE, kw_apoe_df)
+
+wrap_plots(me_apoe, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") +
+  plot_annotation(title = 'Kruskal-Wallis: APOE genotype')
+
+ggsave(file = paste0(res_dir, "/APOE_me_boxplot.png"), width = 8, height = 10)
+
+me_sex = lapply(mods, plot_me, me_meta, Sex, wilcox_sex_df)
+
+wrap_plots(me_sex, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") +
+  plot_annotation(title = 'Wilcoxon Rank Sum: Sex')
+
+ggsave(file = paste0(res_dir, "/Sex_me_boxplot.png"), width = 8, height = 10)
+
+```
+
+```{r, eval=FALSE, echo=FALSE}
+
+plot_me_module = function(me_meta, module){
+
+  me_mod = 
+    me_meta %>%
+    filter(Module == module)
+  
+  p_diag = ggplot(me_mod, aes(x = Diagnosis, y = ModuleEigengene)) +
+    geom_boxplot(outlier.shape = NA, color = "red") +
+    geom_jitter(alpha = .3, size =1) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  p_neuron = ggplot(me_mod, aes(x = Neurons, y = ModuleEigengene)) +
+    geom_boxplot(outlier.shape = NA, color = "red") +
+    geom_jitter(alpha = .3, size =1) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+   p_sex = ggplot(me_mod, aes(x = Sex, y = ModuleEigengene)) +
+    geom_boxplot(outlier.shape = NA, color = "red") +
+    geom_jitter(alpha = .3, size =1) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+   
+   p_APOE = ggplot(me_mod, aes(x = APOE, y = ModuleEigengene)) +
+    geom_boxplot(outlier.shape = NA, color = "red") +
+    geom_jitter(alpha = .3, size =1) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  p_all = p_diag + p_neuron + p_sex + p_APOE +
+  plot_annotation(title = module) + plot_layout(axes = "collect")
+
+  plot(p_all)
+  
+}
+
+plot_me_module(me_meta, "MEmagenta")
+```
+
+### Check association between catagorical traits and module gene expression using PERMANOVA
+
+With the Wilcoxon Rank-Sum and Kruskal-Wallis tests we directly compare sample module eigengenes between groups. But because eigengenes are a univariate projection of multivariate data, this analysis leaves out other dimensions of the data and can be potentially be misleading.
+
+PERMANOVA compares the variation between groups to the variation within groups and is appropriate for multivariate data, like gene expression data. The key insight behind PERMANOVA is that the variation within a group and between groups can be calculated directly from a distance matrix, in this case the euclidean distance between samples in gene expression space. The PERMANOVA results can be found in `r paste0(res_dir, "/PERMANOVA_results.csv")`. The table below shows the results for each trait with $Padj < .05$.
+
+```{r, message=FALSE, warning=FALSE}
+
+library(vegan)
+
+meta_cat = 
+ meta %>%
+  mutate(
+    Sex = case_when(Male == 1 ~ "Male",
+                    Male == 0 ~ "Female"),
+    APOE = case_when(APOE2 == 1 ~ "APOE2",
+                     APOE3 == 1 ~ "APOE3",
+                     APOE4 == 1 ~ "APOE4")) %>%
+  select(Sample, ID, Diagnosis, Neurons,
+         GROUP, Sex, APOE)
+ 
+rownames(meta_cat) = meta_cat$Sample
+ 
+expr_idx = match(rownames(meta_cat), rownames(lmExpr))
+lmExpr_ordered  <- lmExpr[expr_idx,]
+ 
+gene_module_vec = names(moduleLabels) 
+names(gene_module_vec) = moduleColors
+
+me_permanova = function(module, meta, expr, trait){
+  
+  goi = gene_module_vec[which(names(gene_module_vec) == module)]
+  expr_goi = expr[,goi]
+  form = as.formula(paste("expr_goi ~", trait, "+ ID"))
+  
+  set.seed(1)
+  test.adonis2 <- adonis2(form,
+                        data = meta,
+                        method = "euc")
+  
+  return(test.adonis2$`Pr(>F)`[1])
+}
+
+mods = unique(names(gene_module_vec))
+voi = c("Diagnosis", "Neurons",
+        "GROUP", "Sex", "APOE")
+
+p_list = list()
+
+for(v in voi){
+  
+  p_vec = sapply(mods, me_permanova, meta_cat, lmExpr_ordered, v)
+  p_list[[v]] = data.frame(Module = names(p_vec),
+                           Trait = v,
+                           Pval = p_vec)
+  
+  p_list[[v]]$Padj = p.adjust(p_list[[v]]$Pval, method="BH")
+  
+  }
+
+p_df = do.call(rbind, p_list)
+write.csv(p_df, file = paste0(res_dir, "/PERMANOVA_results.csv"))
+
+```
+
+```{r}
+datatable(p_df %>%
+            filter(Padj < .05, Trait != "GROUP") %>%
+            mutate(Padj = formatC(Padj, format = "e", digits = 2),
+                   Pval = formatC(Pval, format = "e", digits = 2)),
+          rownames = FALSE,
+          filter = "top"
+)
+```
+
+### Check for differences in dispersion and plot PCoA
+
+[Anderson & Walsh (2013)](https://doi.org/10.1890/12-2010.1): PERMANOVA is unaffected by heterogeneity in dispersion if the design is balanced but affected by it if the design is unbalanced. PERMANOVA's reliability when applied to unbalanced designs can be poor. In this experiment, none of the categories within the traits of interest contain the same number of samples, and PERMANOVA may be especially unreliable for assessing differences between samples based on Sex (Female = 59, Male = 22) or APOE status (APOE2 = 3, APOE3 = 57, APOE4 = 21) when the dispersion is different between sample groups. 
+
+A non-significant result from PERMDISP would indicate that groups do not differ in dispersion and that therefore the differences are entirely due to differences in location. A significant result from PERMDISP would indicate that the groups differ in dispersion. So a significant PERMANOVA result may not be meaningful if PERMDISP is also significant. 
+
+```{r, message=FALSE, warning=FALSE, fig.height=10, fig.width=8}
+
+plot_pcoa = function(module, expr, meta, trait, permanova_df) {
+  
+  goi = gene_module_vec[which(names(gene_module_vec) == module)]
+
+  euc_dist = dist(expr[,goi], diag = TRUE, upper = TRUE)
+  
+  to_test = 
+    meta %>%
+    pull({{ trait }})
+  
+  bdisp = betadisper(euc_dist,
+                     group = to_test,
+                     type = "centroid",
+                     bias.adjust = FALSE,
+                     sqrt.dist = FALSE,
+                     add = FALSE)
+  
+  set.seed(1)
+  disp_p = permutest(bdisp)$tab[1,6]
+  
+  bdisp_df = data.frame(Sample = rownames(bdisp$vectors),
+                        PCoA1 = bdisp$vectors[,1],
+                        PCoA2 = bdisp$vectors[,2],
+                        Distance = bdisp$distances,
+                        Group = bdisp$group) %>%
+    add_count(Group) %>%
+    mutate(Group = paste0(Group, " (n = ", n, ")"))
+  
+  bdisp_df = 
+    bdisp_df %>%
+    add_count(Group) %>%
+    mutate()
+  
+  perm_p = 
+    permanova_df %>%
+    filter(Module == module,
+           Trait == as.character(trait)) %>%
+    pull(Padj)
+  
+  get_hull <- function(df) {
+    df[chull(df$PCoA1, df$PCoA2), ]
+  }
+  
+  # Get convex hulls for each group
+  hulls <- bdisp_df %>%
+    group_by(Group) %>%
+    do(get_hull(.)) %>%
+    ungroup()
+  
+  pcoa_plot = ggplot(bdisp_df, aes(x = PCoA1, y = PCoA2, color = Group))+
+    geom_point(size = .5) +
+    geom_polygon(data = hulls, aes(PCoA1, PCoA2, color = Group), fill = NA) +
+    ggtitle(paste0(module, " (", length(goi), " genes)"),
+            subtitle = paste0("PERMANOVA FDR = ", formatC(perm_p, 
+                                                          format = "e", 
+                                                          digits = 2) ,
+                              "\nPERMDISP p = ", formatC(disp_p, 
+                                                          format = "e", 
+                                                          digits = 2))) +
+    theme_classic() +
+    theme(plot.subtitle = element_text(size = 8),
+          plot.title = element_text(size = 10)) +
+    labs(color = trait)
+   
+  return(pcoa_plot)
+  
+}
+
+mods = unique(names(gene_module_vec))
+
+pcoa_neurons = lapply(mods, plot_pcoa, lmExpr_ordered, meta_cat, "Neurons", p_df)
+
+wrap_plots(pcoa_neurons, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") +
+  plot_annotation(title = 'Neuron Type')
+
+ggsave(file = paste0(res_dir, "/Neurons_pcoa.png"), width = 8, height = 10)
+
+pcoa_diag = lapply(mods, plot_pcoa, lmExpr_ordered, meta_cat, "Diagnosis", p_df)
+
+wrap_plots(pcoa_diag, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") +
+  plot_annotation(title = 'Diagnosis')
+
+ggsave(file = paste0(res_dir, "/Diagnosis_pcoa.png"), width = 8, height = 10)
+
+pcoa_apoe = lapply(mods, plot_pcoa, lmExpr_ordered, meta_cat, "APOE", p_df)
+
+wrap_plots(pcoa_apoe, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") +
+  plot_annotation(title = 'APOE genotype')
+
+ggsave(file = paste0(res_dir, "/APOE_pcoa.png"), width = 8, height = 10)
+
+pcoa_sex = lapply(mods, plot_pcoa, lmExpr_ordered, meta_cat, "Sex", p_df)
+
+wrap_plots(pcoa_sex, ncol=4) + 
+  guide_area() + 
+  plot_layout(axis = "collect", guides = "collect") +
+  plot_annotation(title = 'Sex')
+
+ggsave(file = paste0(res_dir, "/Sex_pcoa.png"), width = 8, height = 10)
+ 
+```
+
+### Intramodular connectivity
+
+The files in `r paste0(res_dir, "/Cytoscape")` can be loaded into [Cytoscape software](https://cytoscape.org/) for module visualization.
+
+Gene to module assignments along with each gene's connectivity measurements are shown below. These values are save in `r paste0(res_dir, "/gene_intramodular_connectivity.csv")`. 
+
+*Column descriptions*
+
+* `kTotal`: for each gene, the sum of the connections to all other genes in the whole network.   
+* `kWithin`: for each gene, the sum of the connections to all other genes in the gene's module. Genes with high kWithin are hub genes in the network.   
+* `kOut`: for each gene, the sum of the connections to all other genes NOT in the gene's module.   
+* `kDiff`: $kWithin-kOut$
+
+```{r, message=FALSE, warning=FALSE, eval=TRUE}
+# intramodular connectivity --------------------------------------
+# https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/Simulated-07-Membership.R
+ 
+kim = intramodularConnectivity.fromExpr(lmExpr, moduleColors, 
+                                  corFnc = "cor", corOptions = "use = 'p'",
+                                  weights = NULL,
+                                  distFnc = "dist", distOptions = "method = 'euclidean'",
+                                  networkType = "signed", power = pwr,
+                                  scaleByMax = FALSE,
+                                  ignoreColors = if (is.numeric(colors)) 0 else "grey",
+                                  getWholeNetworkConnectivity = TRUE)
+
+
+rownames(kim) = colnames(lmExpr)
+kim$module = moduleColors
+kim  = arrange(kim, module, desc(kWithin))
+write.csv(kim, file = paste0(res_dir, "/gene_intramodular_connectivity.csv"))
+
+# export for cytoscape ----------------------------------------------------
+# Recalculate topological overlap if needed
+TOM = TOMsimilarityFromExpr(lmExpr, 
+                            power = pwr,
+                            networkType = "signed",
+                            TOMType = "signed",
+                            verbose = 0)
+
+dir.create(paste0(res_dir, "/Cytoscape"))
+modules = unique(moduleColors)
+genes = rownames(kim) = colnames(lmExpr)
+
+for(mod in modules){
+  
+  inModule = is.finite(match(moduleColors, mod))
+  mod_genes = genes[inModule]
+  modTOM = TOM[inModule, inModule]
+  dimnames(modTOM) = list(mod_genes, mod_genes)
+  cyt = exportNetworkToCytoscape(modTOM,
+                                 edgeFile = paste(res_dir, "/Cytoscape/Input-edges-", 
+                                                  mod,
+                                                  ".txt", sep=""),
+                                 nodeFile = paste(res_dir, "/Cytoscape/Input-nodes-", 
+                                                  mod,
+                                                  ".txt", sep=""),
+                                 weighted = TRUE,
+                                 threshold = 0,
+                                 nodeNames = mod_genes,
+                                 nodeAttr = mod) 
+}
+```
+
+```{r,message=FALSE, warning=FALSE}
+kim = read.csv(paste0(res_dir, "/gene_intramodular_connectivity.csv"), row.names = 1)
+
+datatable(kim %>%
+            mutate(kTotal = format(kTotal, digits=3),
+                   kWithin = format(kWithin, digits=3),
+                   kOut = format(kOut, digits=3),
+                   kDiff = format(kDiff, digits=3)))
+```
+
+### DE genes with Kme and Kwithin
+
+In Weighted Gene Co-expression Network Analysis (WGCNA), Module Eigengene Connectivity (kME) is calculated by correlating the expression of individual genes with the eigengenes of the modules to which they are assigned. Specifically, kME measures the degree to which a gene's expression profile aligns with the module's expression profile. Intramodular Connectivity (kwithin) is the sum of the connections to all other genes in the gene's module. Genes with high kME and kWithin are hub genes in the network. This table is saved in `r paste0(res_dir, "/kme_kwithin_deg.csv")`. The table below is filtered for the top ten genes ranked by kME or kWithin for each module. 
+
+*Column descriptions*
+
+* `gene_name`
+* `Module`: Module the gene belongs to 
+* `kME`: Module Eigengene Connectivity  
+* `kWithin`: Intramodular Connectivity  
+* `logFC`: log2(fold change) from the p75NTR+/TOC1- vs. p75NTR+/TOC1+ nbM neurons DE analysis 
+* `adj.P.Val`: adjusted p-value from the p75NTR+/TOC1- vs. p75NTR+/TOC1+ nbM neurons DE analysis  
+* `kWithinRank`: The within-module ranking of genes by kWithin  
+* `kMERank`: he within-module ranking of genes by kME  
+
+```{r}
+deg = read.xlsx("data/DE_res_mixed_TOC1-p75.xlsx")
+kim$gene_name = rownames(kim)
+kme = signedKME(lmExpr, MEs0)
+
+kme$gene_name = rownames(kme)
+kme$Module = paste0("kME",names(gene_module_vec))
+
+kme_mod <- 
+  kme %>%
+  rowwise() %>%
+  mutate(kME = pick(-all_of(c("Module", "gene_name")))[[Module]]) %>%
+  ungroup() %>%
+  mutate(Module = gsub("kME","", kme$Module)) %>%
+  left_join(deg, by = "gene_name") %>%
+  left_join(kim, by = "gene_name") %>%
+  select(gene_name, Module, kME, kWithin, logFC, adj.P.Val) %>%
+  group_by(Module) %>%
+  mutate(kWithinRank = rank(desc(kWithin)),
+         kMERank = rank(desc(kME)))
+
+write.csv(kme_mod, file = paste0(res_dir, "/kme_kwithin_deg.csv"))    
+
+kme_mod$Module = as.factor(kme_mod$Module) 
+kme_mod$gene_name = as.factor(kme_mod$gene_name) 
+
+datatable(kme_mod %>% filter(kMERank < 11 | kWithinRank < 11), rownames = FALSE, filter = "top")
+```
+
+## Over-representation analysis
+
+Over-representation analysis involves a statistical comparison between two gene sets. The aim is to determine whether the functions or pathways associated with the input genes are more prevalent than what would be expected by chance. Here, we use the hypergeometric distribution to evaluate whether the number of module associated genes that belong to a particular function or pathway is significantly higher than expected by chance. If this is the case, it suggests the genes in that module are involved in that particular function or pathway. 
+
+The results can be found in `r paste0(res_dir, "/module_over_representation_analysis.csv")`
+
+**Column descriptions**
+
+  * `Module` - WGCNA module   
+  * `significant` - indicator for statistically significant results   
+  * `p_value` - hypergeometric p-value after correction for multiple testing    
+  * `term_size` - number of genes that are annotated to the term    
+  * `query_size` - number of genes that were included in the query (Module)   
+  * `term_id` - unique term identifier (e.g GO:0005005)   
+  * `source` - the abbreviation of the data source for the term (e.g. GO:BP)    
+  * `term_name` - the short name of the GO term or KEGG pathway   
+  * `effective_domain_size` - the total number of genes “in the universe” used for the hypergeometric test    
+  * `evidence_codes` - a lists of all [evidence codes](http://geneontology.org/docs/guide-go-evidence-codes/) for the intersecting genes between input and the term. The evidences are separated by comma for each gene.    
+  * `ENTREZ_intersection` - a comma separated list of ENTREZ ids from the module that are annotated to the corresponding term   
+  * `gene_name` - a comma separated list of gene symbols ids from the module that are annotated to the corresponding term   
+  
+```{r, message=FALSE, warning=FALSE, eval = TRUE}
+# load gene symbol key
+key = read.csv("data/gene_key.csv")
+key$ENTREZ = as.character(key$ENTREZ)
+
+kim = read.csv(paste0(res_dir, "/gene_intramodular_connectivity.csv"), row.names = 1)
+module_genes = kim
+module_genes$original_name = rownames(module_genes)
+
+module_genes =
+  module_genes %>%
+  filter(original_name %in% key$original_name) %>%
+  dplyr::select(original_name, module) %>%
+  left_join(key) %>%
+  dplyr::select(ENTREZ, module)
+
+module_gene_list = list()
+for(mod in unique(module_genes$module)){
+  
+  module_gene_list[[mod]] = 
+    module_genes %>%
+    filter(module == mod) %>%
+    pull(ENTREZ)
+}
+
+names(module_gene_list) = unique(module_genes$module)
+  
+module_gene_list = module_gene_list[!names(module_gene_list) %in% "grey"]
+
+gp_res = gost(query = module_gene_list,
+              organism = "hsapiens",
+              significant = FALSE,
+              correction_method = "g_SCS",
+              domain_scope = "custom",
+              custom_bg = module_genes$ENTREZ,
+              numeric_ns = "ENTREZGENE_ACC",
+              sources = c("GO:BP", "GO:MF", "GO:CC", "KEGG"),
+              evcodes = TRUE,
+              highlight = TRUE)
+
+suppressWarnings(
+  suppressMessages(
+   gene_string_df <- 
+     gp_res$result %>%
+     separate_longer_delim(intersection, delim = ",") %>%
+     dplyr::rename(ENTREZ = "intersection",
+                   Module = "query") %>%
+     left_join(key) %>%
+     dplyr::select(Module, gene_name, term_id) %>%
+     group_by(Module, term_id) %>% 
+     summarise_all(toString)
+   )
+  )
+
+  gp_res_df = 
+    gp_res$result %>%
+    dplyr::rename(Module = "query",
+           ENTREZ_intersection = "intersection")
+   
+  suppressWarnings(
+    suppressMessages(
+      gp_res_df <- 
+        left_join(gp_res_df, gene_string_df) %>%
+        dplyr::select(-parents, -source_order, -precision, -recall)
+      )
+    )
+
+write.csv(gp_res_df, file = paste0(res_dir, "/module_over_representation_analysis.csv"))          
+```
+
+### Enriched terms (adjusted p-val < .05)
+
+Columns are as described above. Filtering the `highlighted` column for `TRUE` gives a non-redundant list of significant terms. For example, `protein processing` and `protein maturation` are highly related terms, an including both in a plot, for example, would be redundant. `protein processing` is chosen as the best representative term for the function of the gene set.  
+
+```{r, message=FALSE, warning=FALSE}
+
+gp_res_sig = gost(query = module_gene_list,
+              organism = "hsapiens",
+              significant = TRUE,
+              correction_method = "g_SCS",
+              domain_scope = "custom",
+              custom_bg = module_genes$ENTREZ,
+              numeric_ns = "ENTREZGENE_ACC",
+              sources = c("GO:BP", "GO:MF", "GO:CC", "KEGG"),
+              evcodes = TRUE,
+              highlight = TRUE)
+
+  gp_sig_df = 
+    gp_res_sig$result %>%
+    dplyr::rename(Module = "query",
+           ENTREZ_intersection = "intersection")
+   
+  suppressWarnings(
+    suppressMessages(
+      gp_sig_df <- 
+        left_join(gp_sig_df, gene_string_df) %>%
+        dplyr::select(-parents, -source_order, 
+                      -precision, -recall, -ENTREZ_intersection,
+                      -evidence_codes) %>%
+        mutate(p_value = format(p_value, digits=3)) 
+      )
+    )
+  
+
+datatable(gp_sig_df)
+
+```
+
+## DE gene enrichment
+
+Gene Set Enrichment Analysis (GSEA) is a computational method used to determine whether a predefined set of genes, known as a gene set, is significantly over represented among genes at the top and bottom of a list of genes ranked by some metric of interest, compared to what would be expected by chance. Here, the gene sets are resident genes of the WGCNA modules, and genes are ranked by the t statistic from limma, which is equal to `log2(FoldChange)/standard error`.
+
+The table below shows WGCNA modules with genes enriched, `pval < .01`, at the top, `Regulation = up-regulated`, and bottom, `Regulation = down-regulated`, of the ranked list of genes. The full results for each comparison are in `r paste0(res_dir,"/module_deg_enrichment_all_results.csv")`. Only enrichments of `padj < .05` should be reported. 
+
+```{r}
+# find enrichment within DE genes 
+deg = read.xlsx("data/DE_res_mixed_TOC1-p75.xlsx")
+
+# merge with gene key
+suppressWarnings(suppressMessages(
+deg_final <- left_join(key, deg)))
+
+# make a vector of genes ranked by stat
+   DEranks = 
+     deg_final %>%
+     dplyr::select(ENTREZ, t) %>%
+     arrange(t) %>%
+     filter(!is.na(t)) %>%
+     deframe()
+   
+# make a module gene list
+module_list = 
+  module_genes %>%
+  group_by(module) %>%
+  group_split()
+
+module_vec = {}
+module_gene_list = list()
+for(i in 1:length(module_list)){
+  
+  module = unique(module_list[[i]]$module)
+  module_vec = c(module_vec, module)
+  module_gene_list[[i]] = module_list[[i]]$ENTREZ
+  
+}
+
+names(module_gene_list) = module_vec
+
+   # perform GSEA analysis
+   fgseaRes_modules <- fgsea(pathways = module_gene_list, 
+                        stats    = DEranks,
+                        minSize  = 10,
+                        maxSize  = 500)
+   
+   # format the results table
+   fgseaRes_modules = 
+     fgseaRes_modules %>%
+     mutate(leadingEdge = sapply(leadingEdge, toString),
+            Regulation = case_when(
+              NES < 0 ~ "down-regulated",
+              NES > 0 ~ "up-regulated")) %>%
+     dplyr::rename(Module = "pathway",
+                   ContributingGenes = "leadingEdge") 
+   
+   key$ENTREZ = as.character(key$ENTREZ)
+   # switch entrez to symbol
+   suppressWarnings(suppressMessages(
+   gene_string_df <- 
+     fgseaRes_modules %>%
+     separate_longer_delim(ContributingGenes, delim = ", ") %>%
+     dplyr::rename(ENTREZ = "ContributingGenes") %>%
+     left_join(key) %>%
+     dplyr::select(Module, gene_name) %>%
+     group_by(Module) %>% 
+     summarise_all(toString)))
+   
+  suppressWarnings(
+    suppressMessages(
+      fgseaRes_modules <- left_join(fgseaRes_modules, gene_string_df)
+      )
+    )
+  
+  write.csv(fgseaRes_modules, file = paste0(res_dir, "/module_deg_enrichment_all_results.csv"), row.names = F)
+
+
+# make interactive table
+fgseaRes_df = 
+  fgseaRes_modules %>%
+  dplyr::filter(pval < .01) %>%
+  dplyr::select(-log2err,
+                -ES,
+                -NES,
+                -ContributingGenes) %>%
+  mutate(padj = format(padj, digits=3),
+         pval = format(pval, digits=3)) 
+  
+datatable(fgseaRes_df, rownames = FALSE, filter = "top")
+```
+
+## Session Info
+```{r}
+sessionInfo()
+```
+

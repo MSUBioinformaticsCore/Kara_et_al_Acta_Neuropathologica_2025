@@ -1,0 +1,16 @@
+nodeName	altName	nodeAttr[nodesPresent, ]
+LEPR	NA	midnightblue
+LIAS/LIP1	NA	NA
+MAN1A1	NA	NA
+USP7	NA	NA
+Gadd45g	NA	NA
+SESN1	NA	NA
+ATP5D	NA	NA
+Bcl2l11	NA	NA
+HSF1	NA	NA
+GHSR	NA	NA
+GHR	NA	NA
+Nmnat1	NA	NA
+Nmnat3	NA	NA
+CYP11A1	NA	NA
+NCOR2	NA	NA

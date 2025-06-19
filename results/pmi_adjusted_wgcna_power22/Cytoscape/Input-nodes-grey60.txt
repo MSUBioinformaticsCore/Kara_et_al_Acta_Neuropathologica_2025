@@ -1,0 +1,13 @@
+nodeName	altName	nodeAttr[nodesPresent, ]
+AKT	NA	grey60
+PARP1/ADPRT	NA	NA
+PRKAB2	NA	NA
+ECE1	NA	NA
+CST3/CSTC	NA	NA
+USP1	NA	NA
+UCHL3	NA	NA
+Foxo4	NA	NA
+Gadd45b	NA	NA
+Rock1	NA	NA
+Nmnat2	NA	NA
+NCOR1	NA	NA
