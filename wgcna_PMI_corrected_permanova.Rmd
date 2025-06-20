@@ -957,6 +957,8 @@ datatable(kme_mod %>% filter(kMERank < 11 | kWithinRank < 11), rownames = FALSE,
 
 ## Over-representation analysis
 
+<span style="color: red;">** These results were not included in the manuscript **</span>
+
 Over-representation analysis involves a statistical comparison between two gene sets. The aim is to determine whether the functions or pathways associated with the input genes are more prevalent than what would be expected by chance. Here, we use the hypergeometric distribution to evaluate whether the number of module associated genes that belong to a particular function or pathway is significantly higher than expected by chance. If this is the case, it suggests the genes in that module are involved in that particular function or pathway. 
 
 The results can be found in `r paste0(res_dir, "/module_over_representation_analysis.csv")`
@@ -1085,6 +1087,8 @@ datatable(gp_sig_df)
 ```
 
 ## DE gene enrichment
+
+<span style="color: red;">** These results were not included in the manuscript **</span>
 
 Gene Set Enrichment Analysis (GSEA) is a computational method used to determine whether a predefined set of genes, known as a gene set, is significantly over represented among genes at the top and bottom of a list of genes ranked by some metric of interest, compared to what would be expected by chance. Here, the gene sets are resident genes of the WGCNA modules, and genes are ranked by the t statistic from limma, which is equal to `log2(FoldChange)/standard error`.
 
